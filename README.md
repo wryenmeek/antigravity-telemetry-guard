@@ -155,6 +155,13 @@ Validates that all commit session trailers are accounted for by an authenticated
 antigravity-telemetry verify --pr <PR_NUMBER> [--post-status] [--repo owner/repo]
 ```
 
+### Prune Merged Branches and Worktrees
+Prunes remote tracking branches, deletes local merged branches, and removes attached git worktrees:
+```bash
+antigravity-telemetry prune [--cwd /path/to/repo] [--quiet]
+```
+*(Also executes automatically via `PostToolUse` lifecycle hook whenever an Antigravity agent runs `gh pr merge` or `git merge`.)*
+
 ### Version Check
 ```bash
 antigravity-telemetry version

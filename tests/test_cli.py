@@ -176,6 +176,53 @@ class TestAntigravityTelemetryCli(unittest.TestCase):
         self.assertEqual(output["decision"], "deny")
         self.assertIn("ANTIGRAVITY MERGE GUARD BLOCKED", output["reason"])
 
+    @patch("subprocess.run")
+    def test_prune_merged_branches_and_worktrees(self, mock_run):
+        # Setup mock return values for sequence of git commands
+        def side_effect(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            mock = MagicMock(returncode=0, stderr="")
+            if "fetch" in cmd_str:
+                mock.stdout = ""
+            elif "rev-parse --abbrev-ref HEAD" in cmd_str:
+                mock.stdout = "main\n"
+            elif "symbolic-ref" in cmd_str:
+                mock.stdout = "origin/main\n"
+            elif "worktree list --porcelain" in cmd_str:
+                mock.stdout = (
+                    "worktree /repo\nHEAD 111\nbranch refs/heads/main\n\n"
+                    "worktree /repo/.worktrees/feat-merged\nHEAD 222\nbranch refs/heads/feat-merged\n\n"
+                )
+            elif "branch -vv" in cmd_str:
+                mock.stdout = "  feat-merged 222 [origin/feat-merged: gone] feat\n* main 111 [origin/main] initial\n"
+            elif "branch --merged" in cmd_str:
+                mock.stdout = "  feat-merged\n* main\n"
+            elif "worktree remove" in cmd_str or "branch -D" in cmd_str or "worktree prune" in cmd_str:
+                mock.stdout = ""
+            return mock
+
+        mock_run.side_effect = side_effect
+        res = cli.prune_merged_branches_and_worktrees("/repo", quiet=True)
+        self.assertIn("feat-merged", res["pruned_branches"])
+        self.assertEqual(len(res["pruned_worktrees"]), 1)
+        self.assertEqual(res["pruned_worktrees"][0]["branch"], "feat-merged")
+
+    @patch("sys.stdin", io.StringIO(json.dumps({
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "gh " + "pr " + "merge 10 --squash",
+                "Cwd": "/repo"
+            }
+        }
+    })))
+    @patch.object(cli, "prune_merged_branches_and_worktrees")
+    @patch("sys.stdout", new_callable=io.StringIO)
+    def test_handle_post_tool_hook_on_merge(self, mock_stdout, mock_prune):
+        mock_prune.return_value = {"pruned_branches": ["feat-done"], "pruned_worktrees": []}
+        cli.handle_post_tool_hook()
+        mock_prune.assert_called_once_with("/repo", quiet=True)
+
 
 if __name__ == "__main__":
     unittest.main()

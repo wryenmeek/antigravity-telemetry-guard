@@ -11,3 +11,7 @@
 - Merges via `gh pr merge` or `git merge` will be intercepted and hard-blocked by the harness (`PreToolUse` deny) if verified telemetry is missing or if any commit is missing session provenance.
 - To satisfy the guard, run:
   `antigravity-telemetry post --pr <PR_NUM>`
+
+## 3. Automated Post-Merge Pruning
+- Whenever `gh pr merge` or `git merge` completes, the Antigravity lifecycle harness hook (`PostToolUse`) automatically executes `antigravity-telemetry prune`.
+- Any local branch or linked `.worktrees/` directory whose remote tracking branch has been deleted/merged is automatically and cleanly pruned.

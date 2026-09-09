@@ -26,3 +26,13 @@ antigravity-telemetry verify --pr <PR_NUMBER>
 - Validates that a verified telemetry receipt exists on the PR.
 - Verifies that all committed session IDs on the PR are present in the receipt.
 - Returns exit code `0` if passed; exits `1` if blocked.
+
+### 3. Prune Merged Branches and Worktrees
+```bash
+antigravity-telemetry prune [--cwd <PATH>] [--quiet]
+```
+- Fetches and prunes remote tracking branches (`git fetch --prune`).
+- Safely removes any git worktrees associated with merged or deleted remote branches.
+- Deletes local merged feature branches while protecting `main`/active branches.
+- Cleans up orphaned worktree metadata (`git worktree prune`).
+- Automatically triggered via `PostToolUse` hook after `gh pr merge` or `git merge`.

@@ -15,6 +15,7 @@ import json
 import sqlite3
 import argparse
 import subprocess
+import shutil
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -699,14 +700,154 @@ def handle_pre_tool_hook():
     sys.stdout.write(json.dumps({"decision": "allow"}))
 
 
+def prune_merged_branches_and_worktrees(cwd: Optional[str] = None, quiet: bool = False) -> Dict[str, Any]:
+    """
+    Prunes git branches whose upstream tracking branch is gone or merged into main,
+    and safely removes any associated git worktrees.
+    """
+    repo_root = cwd or os.getcwd()
+
+    # 1. Run git fetch --prune
+    try:
+        subprocess.run(["git", "-C", repo_root, "fetch", "--prune"], capture_output=True, text=True, timeout=30)
+    except Exception:
+        pass
+
+    # 2. Get current HEAD branch
+    head_res = subprocess.run(["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
+    current_branch = head_res.stdout.strip() if head_res.returncode == 0 else ""
+
+    # Find default branch (e.g. main or master)
+    default_branch = "main"
+    remotes = subprocess.run(["git", "-C", repo_root, "symbolic-ref", "refs/remotes/origin/HEAD", "--short"], capture_output=True, text=True)
+    if remotes.returncode == 0 and remotes.stdout.strip():
+        default_branch = remotes.stdout.strip().replace("origin/", "")
+
+    # Protected branch names
+    protected = {"main", "master", "develop", default_branch, current_branch}
+
+    # 3. Inspect git worktree list --porcelain
+    wt_res = subprocess.run(["git", "-C", repo_root, "worktree", "list", "--porcelain"], capture_output=True, text=True)
+    worktrees = []
+    if wt_res.returncode == 0:
+        current_wt = {}
+        for line in wt_res.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                if current_wt:
+                    worktrees.append(current_wt)
+                    current_wt = {}
+            elif line.startswith("worktree "):
+                current_wt["path"] = line.split(" ", 1)[1]
+            elif line.startswith("branch refs/heads/"):
+                current_wt["branch"] = line.split("refs/heads/", 1)[1]
+        if current_wt:
+            worktrees.append(current_wt)
+
+    branch_to_wt = {wt["branch"]: wt["path"] for wt in worktrees if "branch" in wt}
+    main_wt_path = os.path.abspath(worktrees[0]["path"]) if worktrees else os.path.abspath(repo_root)
+
+    # 4. Find branches whose tracking branch is [gone]
+    gone_branches = []
+    branch_vv = subprocess.run(["git", "-C", repo_root, "branch", "-vv"], capture_output=True, text=True)
+    if branch_vv.returncode == 0:
+        for line in branch_vv.stdout.splitlines():
+            line = line.strip()
+            if ": gone]" in line:
+                parts = line.split()
+                b_name = parts[0].lstrip("*+").strip()
+                if b_name and b_name not in protected:
+                    gone_branches.append(b_name)
+
+    # 5. Also check git branch --merged <default_branch>
+    merged_res = subprocess.run(["git", "-C", repo_root, "branch", "--merged", default_branch], capture_output=True, text=True)
+    merged_branches = []
+    if merged_res.returncode == 0:
+        for line in merged_res.stdout.splitlines():
+            b_name = line.strip().lstrip("*+").strip()
+            if b_name and b_name not in protected:
+                merged_branches.append(b_name)
+
+    candidates = sorted(list(set(gone_branches + merged_branches)))
+
+    pruned_worktrees = []
+    pruned_branches = []
+
+    for b in candidates:
+        # If a worktree is attached to this branch
+        if b in branch_to_wt:
+            wt_path = os.path.abspath(branch_to_wt[b])
+            if wt_path != main_wt_path:
+                rm_res = subprocess.run(["git", "-C", repo_root, "worktree", "remove", "--force", wt_path], capture_output=True, text=True)
+                if rm_res.returncode == 0 or not os.path.exists(wt_path):
+                    pruned_worktrees.append({"branch": b, "path": wt_path})
+                else:
+                    try:
+                        shutil.rmtree(wt_path, ignore_errors=True)
+                        pruned_worktrees.append({"branch": b, "path": wt_path})
+                    except Exception:
+                        pass
+
+        # Delete local branch
+        del_res = subprocess.run(["git", "-C", repo_root, "branch", "-D", b], capture_output=True, text=True)
+        if del_res.returncode == 0:
+            pruned_branches.append(b)
+
+    # 6. Run git worktree prune
+    subprocess.run(["git", "-C", repo_root, "worktree", "prune"], capture_output=True, text=True)
+
+    # Clean up .worktrees dir if empty
+    worktrees_dir = os.path.join(repo_root, ".worktrees")
+    if os.path.isdir(worktrees_dir) and not os.listdir(worktrees_dir):
+        try:
+            os.rmdir(worktrees_dir)
+        except Exception:
+            pass
+
+    if not quiet:
+        if pruned_branches or pruned_worktrees:
+            print(f"[Antigravity Prune] Successfully pruned {len(pruned_branches)} merged branch(es) and {len(pruned_worktrees)} worktree(s).")
+            for b in pruned_branches:
+                print(f"  - Deleted branch: {b}")
+            for w in pruned_worktrees:
+                print(f"  - Removed worktree: {w['path']} ({w['branch']})")
+        else:
+            print("[Antigravity Prune] Working tree is clean. No stale branches or worktrees to prune.")
+
+    return {
+        "pruned_branches": pruned_branches,
+        "pruned_worktrees": pruned_worktrees,
+    }
+
+
 def handle_post_tool_hook():
     """
     Antigravity PostToolUse hook handler on stdin/stdout.
+    When 'gh pr merge' or 'git merge' completes, automatically triggers worktree and branch pruning!
     """
     try:
-        json.load(sys.stdin)
+        payload = json.load(sys.stdin)
     except Exception:
-        pass
+        sys.stdout.write(json.dumps({}))
+        return
+
+    tool_call = payload.get("toolCall", {})
+    name = tool_call.get("name", "")
+    args = tool_call.get("args", {})
+    cmd_line = args.get("CommandLine", "") if isinstance(args, dict) else ""
+    cwd = args.get("Cwd") if isinstance(args, dict) else None
+
+    # Check if a merge command just executed
+    if name == "run_command" and (re.search(r"\bgh\s+pr\s+merge\b", cmd_line) or re.search(r"\bgit\s+merge\b", cmd_line)):
+        try:
+            prune_res = prune_merged_branches_and_worktrees(cwd, quiet=True)
+            pruned_b = prune_res.get("pruned_branches", [])
+            pruned_w = prune_res.get("pruned_worktrees", [])
+            if pruned_b or pruned_w:
+                sys.stderr.write(f"[Antigravity Prune] Automatically pruned {len(pruned_b)} merged branch(es) and {len(pruned_w)} worktree(s).\n")
+        except Exception as e:
+            sys.stderr.write(f"[Antigravity Prune] Note: {e}\n")
+
     sys.stdout.write(json.dumps({}))
 
 
@@ -729,6 +870,11 @@ def main():
     p_ver.add_argument("--post-status", action="store_true", help="Post commit status check to PR head commit")
     p_ver.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC, help="Subprocess timeout in seconds")
 
+    # prune
+    p_prune = subparsers.add_parser("prune", help="Automatically prune merged branches and attached git worktrees")
+    p_prune.add_argument("--cwd", type=str, default=None, help="Target repository directory (defaults to current directory)")
+    p_prune.add_argument("--quiet", action="store_true", help="Suppress verbose output")
+
     # hooks
     subparsers.add_parser("hook-pre-tool", help="Antigravity PreToolUse hook handler")
     subparsers.add_parser("hook-post-tool", help="Antigravity PostToolUse hook handler")
@@ -740,6 +886,9 @@ def main():
 
     if args.command == "version":
         print("antigravity-telemetry-guard v1.0.0")
+        sys.exit(0)
+    elif args.command == "prune":
+        prune_merged_branches_and_worktrees(args.cwd, quiet=args.quiet)
         sys.exit(0)
     elif args.command == "post":
         success = generate_and_post_telemetry(args.pr, args.repo, timeout=args.timeout)
