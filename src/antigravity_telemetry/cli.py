@@ -630,8 +630,8 @@ def handle_pre_tool_hook():
     cmd_line = args.get("CommandLine", "") if isinstance(args, dict) else ""
     conv_id = payload.get("conversationId", "")
 
-    # Check for git commit
-    if name == "run_command" and re.search(r"\bgit\s+commit\b", cmd_line):
+    # Check for git commit at command boundary
+    if name == "run_command" and re.search(r"(?:^|[;&|]\s*)\bgit(?:\s+-[^\s]+)*\s+commit\b", cmd_line):
         if conv_id and "Antigravity-Session-ID" not in cmd_line:
             mutated_cmd = cmd_line
             if re.search(r'-m\s+["\']', mutated_cmd):
@@ -656,8 +656,8 @@ def handle_pre_tool_hook():
             }))
             return
 
-    # Check for git merge or gh pr merge
-    if name == "run_command" and (re.search(r"\bgh\s+pr\s+merge\b", cmd_line) or re.search(r"\bgit\s+merge\b", cmd_line)):
+    # Check for git merge or gh pr merge at command boundary
+    if name == "run_command" and re.search(r"(?:^|[;&|]\s*)\b(gh\s+pr\s+merge|git(?:\s+-[^\s]+)*\s+merge)\b", cmd_line):
         cwd = args.get("Cwd") if isinstance(args, dict) else None
         if cwd and os.path.isdir(cwd):
             try:
@@ -682,7 +682,7 @@ def handle_pre_tool_hook():
             except Exception:
                 pass
 
-        match = re.search(r"\bgh\s+pr\s+merge\s+(\d+)", cmd_line)
+        match = re.search(r"(?:^|[;&|]\s*)\bgh\s+pr\s+merge\s+(\d+)", cmd_line)
         if match:
             pr_num = int(match.group(1))
             passed, msg, _, _ = verify_pr_telemetry(pr_num, repo=repo)
@@ -837,8 +837,8 @@ def handle_post_tool_hook():
     cmd_line = args.get("CommandLine", "") if isinstance(args, dict) else ""
     cwd = args.get("Cwd") if isinstance(args, dict) else None
 
-    # Check if a merge command just executed
-    if name == "run_command" and (re.search(r"\bgh\s+pr\s+merge\b", cmd_line) or re.search(r"\bgit\s+merge\b", cmd_line)):
+    # Check if a merge command just executed at command boundary
+    if name == "run_command" and re.search(r"(?:^|[;&|]\s*)\b(gh\s+pr\s+merge|git(?:\s+-[^\s]+)*\s+merge)\b", cmd_line):
         try:
             prune_res = prune_merged_branches_and_worktrees(cwd, quiet=True)
             pruned_b = prune_res.get("pruned_branches", [])
