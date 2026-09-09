@@ -333,6 +333,111 @@ class TestVerifyPrTelemetry(unittest.TestCase):
             vpr.get_all_pr_commits_and_head(11, repo="wryenmeek/pp-docker")
         self.assertIn("Malformed GraphQL response on PR #11 (cursor cursor_1)", str(ctx.exception))
 
+    @patch.object(vpr, "get_all_pr_commits_and_head")
+    @patch.object(vpr, "get_pr_comments")
+    @patch.object(vpr, "get_unresolved_review_threads")
+    def test_unresolved_review_threads_fails_guard(self, mock_threads, mock_comments, mock_commits):
+        mock_commits.return_value = (
+            [{
+                "oid": "abc12345",
+                "messageHeadline": "feat: ai change",
+                "messageBody": "Antigravity-Session-ID: 53ab9a5b-7ca6-4d25-9e39-21463c3bcd6b"
+            }],
+            "abc12345678"
+        )
+        receipt = {
+            "total_billed_tokens": 1000,
+            "covered_session_ids": ["53ab9a5b-7ca6-4d25-9e39-21463c3bcd6b"]
+        }
+        mock_comments.return_value = [
+            {
+                "body": f"{vpr.RECEIPT_START} {json.dumps(receipt)} {vpr.RECEIPT_END}",
+                "authorAssociation": "OWNER"
+            }
+        ]
+        mock_threads.return_value = [
+            {
+                "id": "PRRT_test123",
+                "author": "reviewer1",
+                "url": "https://github.com/wryenmeek/pp-docker/pull/11#discussion_r123",
+                "body": "Please add tests for this function"
+            }
+        ]
+
+        passed, msg, receipt_data, head_sha = vpr.verify_pr_telemetry(11)
+        self.assertFalse(passed)
+        self.assertIn("UNRESOLVED REVIEW COMMENTS", msg)
+        self.assertIn("PRRT_test123", msg)
+        self.assertIn("reviewer1", msg)
+        self.assertIn("Please add tests for this function", msg)
+
+        # When check_comments is False, it should pass
+        passed_ignored, msg_ignored, _, _ = vpr.verify_pr_telemetry(11, check_comments=False)
+        self.assertTrue(passed_ignored)
+        self.assertIn("ANTIGRAVITY MERGE GUARD PASSED", msg_ignored)
+
+    @patch.object(vpr, "get_all_pr_commits_and_head")
+    @patch.object(vpr, "get_pr_comments")
+    @patch.object(vpr, "get_unresolved_review_threads")
+    def test_resolved_review_threads_passes_guard(self, mock_threads, mock_comments, mock_commits):
+        mock_commits.return_value = (
+            [{
+                "oid": "abc12345",
+                "messageHeadline": "feat: ai change",
+                "messageBody": "Antigravity-Session-ID: 53ab9a5b-7ca6-4d25-9e39-21463c3bcd6b"
+            }],
+            "abc12345678"
+        )
+        receipt = {
+            "total_billed_tokens": 1000,
+            "covered_session_ids": ["53ab9a5b-7ca6-4d25-9e39-21463c3bcd6b"]
+        }
+        mock_comments.return_value = [
+            {
+                "body": f"{vpr.RECEIPT_START} {json.dumps(receipt)} {vpr.RECEIPT_END}",
+                "authorAssociation": "OWNER"
+            }
+        ]
+        mock_threads.return_value = []
+
+        passed, msg, receipt_data, head_sha = vpr.verify_pr_telemetry(11)
+        self.assertTrue(passed)
+        self.assertIn("ANTIGRAVITY MERGE GUARD PASSED", msg)
+
+    @patch("subprocess.run")
+    def test_get_unresolved_review_threads_parses_unresolved_only(self, mock_run):
+        graphql_resp = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [
+                                {
+                                    "id": "PRRT_resolved",
+                                    "isResolved": True,
+                                    "comments": {"nodes": [{"author": {"login": "user1"}, "body": "resolved comment", "url": "url1"}]}
+                                },
+                                {
+                                    "id": "PRRT_open",
+                                    "isResolved": False,
+                                    "comments": {"nodes": [{"author": {"login": "user2"}, "body": "open feedback", "url": "url2"}]}
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(graphql_resp))
+        unresolved = vpr.get_unresolved_review_threads(11, repo="wryenmeek/pp-docker")
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["id"], "PRRT_open")
+        self.assertEqual(unresolved[0]["author"], "user2")
+        self.assertEqual(unresolved[0]["url"], "url2")
+        self.assertEqual(unresolved[0]["body"], "open feedback")
+
 
 if __name__ == "__main__":
     unittest.main()
+

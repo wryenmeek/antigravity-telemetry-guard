@@ -165,33 +165,125 @@ def extract_session_ids_from_text(text: str) -> List[str]:
     return result
 
 
+def get_repo_owner_and_name(repo: Optional[str] = None, timeout: int = 60) -> Tuple[Optional[str], Optional[str]]:
+    """Resolves owner and repo name from parameter, GITHUB_REPOSITORY, or gh CLI."""
+    if repo and "/" in repo:
+        parts = repo.split("/", 1)
+        return parts[0], parts[1]
+    if os.getenv("GITHUB_REPOSITORY") and "/" in os.environ["GITHUB_REPOSITORY"]:
+        parts = os.environ["GITHUB_REPOSITORY"].split("/", 1)
+        return parts[0], parts[1]
+    try:
+        res = subprocess.run(
+            ["gh", "repo", "view", "--json", "owner,name"],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if res.returncode == 0:
+            repo_data = json.loads(res.stdout)
+            return repo_data.get("owner", {}).get("login"), repo_data.get("name")
+    except Exception:
+        pass
+    return None, None
+
+
+def get_unresolved_review_threads(
+    pr_num: int,
+    repo: Optional[str] = None,
+    timeout: int = 60
+) -> List[Dict[str, Any]]:
+    """
+    Fetches all pull request review threads via GitHub GraphQL API and returns
+    any open/unresolved threads (isResolved == False).
+    """
+    owner, repo_name = get_repo_owner_and_name(repo, timeout=timeout)
+    if not owner or not repo_name:
+        return []
+
+    unresolved: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+
+    query = """
+    query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+              isResolved
+              isOutdated
+              comments(first: 1) {
+                nodes {
+                  author { login }
+                  body
+                  url
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    while True:
+        cmd = ["gh", "api", "graphql", "-F", f"owner={owner}", "-F", f"repo={repo_name}", "-F", f"pr={pr_num}"]
+        if cursor:
+            cmd.extend(["-F", f"cursor={cursor}"])
+        cmd.extend(["-f", f"query={query}"])
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as te:
+            raise RuntimeError(f"GitHub CLI timed out after {timeout}s fetching PR #{pr_num} review threads (cursor: {cursor})") from te
+
+        if res.returncode != 0:
+            if not cursor and not unresolved:
+                return []
+            raise RuntimeError(f"GraphQL pagination failed on PR #{pr_num} review threads (cursor {cursor}): {res.stderr.strip()}")
+
+        try:
+            data = json.loads(res.stdout)
+        except json.JSONDecodeError as je:
+            if not cursor and not unresolved:
+                return []
+            raise RuntimeError(f"Malformed GraphQL response on PR #{pr_num} review threads (cursor {cursor}): {je}") from je
+
+        pr_obj = data.get("data", {}).get("repository", {}).get("pullRequest")
+        if not pr_obj:
+            break
+
+        threads_obj = pr_obj.get("reviewThreads", {})
+        for node in threads_obj.get("nodes", []):
+            if not node.get("isResolved"):
+                comments = node.get("comments", {}).get("nodes") or []
+                first_comment = comments[0] if comments else {}
+                author_login = first_comment.get("author", {}).get("login", "unknown") if first_comment.get("author") else "unknown"
+                unresolved.append({
+                    "id": node.get("id", ""),
+                    "author": author_login,
+                    "url": first_comment.get("url", ""),
+                    "body": first_comment.get("body", "")
+                })
+
+        page_info = threads_obj.get("pageInfo", {})
+        if page_info.get("hasNextPage") and page_info.get("endCursor"):
+            cursor = page_info.get("endCursor")
+        else:
+            break
+
+    return unresolved
+
+
 def get_all_pr_commits_and_head(
     pr_num: int,
     repo: Optional[str] = None,
     timeout: int = 60
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Fetches all commits in a PR across any number of pages via GraphQL."""
-    owner = None
-    repo_name = None
-
-    if repo and "/" in repo:
-        parts = repo.split("/", 1)
-        owner, repo_name = parts[0], parts[1]
-    elif os.getenv("GITHUB_REPOSITORY") and "/" in os.environ["GITHUB_REPOSITORY"]:
-        parts = os.environ["GITHUB_REPOSITORY"].split("/", 1)
-        owner, repo_name = parts[0], parts[1]
-    else:
-        try:
-            res = subprocess.run(
-                ["gh", "repo", "view", "--json", "owner,name"],
-                capture_output=True, text=True, timeout=timeout
-            )
-            if res.returncode == 0:
-                repo_data = json.loads(res.stdout)
-                owner = repo_data.get("owner", {}).get("login")
-                repo_name = repo_data.get("name")
-        except Exception:
-            pass
+    owner, repo_name = get_repo_owner_and_name(repo, timeout=timeout)
 
     commits: List[Dict[str, Any]] = []
     head_sha: Optional[str] = None
@@ -337,19 +429,40 @@ def post_commit_status(
 def verify_pr_telemetry(
     pr_num: int,
     repo: Optional[str] = None,
-    timeout: int = 60
+    timeout: int = 60,
+    check_comments: bool = True
 ) -> Tuple[bool, str, Optional[Dict[str, Any]], Optional[str]]:
     """
     Deterministically validates that a PR satisfies the Antigravity Telemetry Pre-Merge Guard:
-    1. Extracts all Antigravity-Session-ID trailers from all PR commits across all pages.
-    2. Verifies that an authenticated Antigravity Telemetry receipt exists in the PR comments.
-    3. Asserts that 100% of committed session IDs are covered in the receipt.
+    1. Checks for open/unresolved PR review comments via GraphQL.
+    2. Extracts all Antigravity-Session-ID trailers from all PR commits across all pages.
+    3. Verifies that an authenticated Antigravity Telemetry receipt exists in the PR comments.
+    4. Asserts that 100% of committed session IDs are covered in the receipt.
     Returns (passed, message, receipt_data, head_sha)
     """
     try:
         commits, head_sha = get_all_pr_commits_and_head(pr_num, repo, timeout=timeout)
     except Exception as e:
         return False, f"Could not inspect PR commits: {e}", None, None
+
+    # Check for open unresolved review comments if enabled
+    if check_comments:
+        try:
+            unresolved = get_unresolved_review_threads(pr_num, repo=repo, timeout=timeout)
+            if unresolved:
+                details = "\n".join(
+                    f"  - [{t.get('author')}] Thread {t.get('id')}: {t.get('url')}\n    \"{t.get('body', '').replace(chr(10), ' ')[:80]}...\""
+                    for t in unresolved
+                )
+                err_msg = (
+                    f"[ANTIGRAVITY MERGE GUARD FAILED: UNRESOLVED REVIEW COMMENTS]\n"
+                    f"PR #{pr_num} has {len(unresolved)} open unresolved review comment thread(s)!\n"
+                    f"{details}\n"
+                    f"Action Required: Resolve all review conversation threads on GitHub before merging."
+                )
+                return False, err_msg, None, head_sha
+        except Exception as e:
+            return False, f"Could not inspect PR review threads: {e}", None, head_sha
 
     committed_sessions: List[Tuple[str, str]] = []
     all_committed_cids = set()
@@ -868,6 +981,7 @@ def main():
     p_ver.add_argument("--pr", type=int, required=True, help="GitHub Pull Request number")
     p_ver.add_argument("--repo", type=str, default=None, help="Optional owner/repo")
     p_ver.add_argument("--post-status", action="store_true", help="Post commit status check to PR head commit")
+    p_ver.add_argument("--ignore-unresolved-comments", action="store_true", help="Skip checking for unresolved PR review comments")
     p_ver.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC, help="Subprocess timeout in seconds")
 
     # prune
@@ -885,7 +999,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "version":
-        print("antigravity-telemetry-guard v1.0.0")
+        print("antigravity-telemetry-guard v1.2.0")
         sys.exit(0)
     elif args.command == "prune":
         prune_merged_branches_and_worktrees(args.cwd, quiet=args.quiet)
@@ -894,12 +1008,14 @@ def main():
         success = generate_and_post_telemetry(args.pr, args.repo, timeout=args.timeout)
         sys.exit(0 if success else 1)
     elif args.command == "verify":
-        passed, msg, receipt_data, head_sha = verify_pr_telemetry(args.pr, args.repo, timeout=args.timeout)
+        passed, msg, receipt_data, head_sha = verify_pr_telemetry(
+            args.pr, args.repo, timeout=args.timeout, check_comments=not args.ignore_unresolved_comments
+        )
 
         if args.post_status and head_sha:
             state = "success" if passed else "failure"
-            desc = "Verified Antigravity session telemetry" if passed else "Missing/incomplete Antigravity session telemetry"
-            if receipt_data:
+            desc = "Verified Antigravity session telemetry & clean reviews" if passed else "Unresolved review comments or missing telemetry"
+            if passed and receipt_data:
                 desc = f"Verified: {receipt_data.get('total_billed_tokens', 0):,} billed ({receipt_data.get('cache_hit_pct', 0)}% cache)"
 
             target_url = None
