@@ -72,6 +72,13 @@ Modern foundation models like **Gemini 3.8 Flash** heavily utilize **session pro
 
 ---
 
+## Prerequisites
+- **Python**: 3.8 or higher.
+- **Git**: 2.30 or higher (for worktree and commit trailer parsing).
+- **GitHub CLI (`gh`)**: 2.40 or higher, authenticated with `gh auth login` (`repo` scope required for GraphQL PR queries and status posting).
+
+---
+
 ## Installation
 
 ### 1. Standalone Python CLI
@@ -84,6 +91,7 @@ git clone https://github.com/wryenmeek/antigravity-telemetry-guard.git
 cd antigravity-telemetry-guard
 pip install -e .
 ```
+*(Once installed, the `antigravity-telemetry` binary is available in `$PATH`. You can also invoke via `python3 -m antigravity_telemetry.cli`.)*
 
 ### 2. Antigravity Agent Plugin
 To enable automatic commit trailer injection and local merge guards in Antigravity:
@@ -146,14 +154,22 @@ jobs:
 ### Post or Refresh PR Telemetry
 Calculates token usage from local Antigravity SQLite databases and posts a verified report comment:
 ```bash
-antigravity-telemetry post --pr <PR_NUMBER> [--repo owner/repo]
+antigravity-telemetry post --pr <PR_NUMBER> [--repo owner/repo] [--timeout 60]
 ```
 
 ### Verify PR Pre-Merge Guard
-Validates that all commit session trailers are accounted for by an authenticated receipt comment:
+Validates that:
+1. All commit session trailers are accounted for by an authenticated receipt comment.
+2. 100% of PR review conversation threads are resolved (blocks merge if open comments exist).
+
 ```bash
-antigravity-telemetry verify --pr <PR_NUMBER> [--post-status] [--repo owner/repo]
+antigravity-telemetry verify --pr <PR_NUMBER> [--post-status] [--ignore-unresolved-comments] [--repo owner/repo] [--timeout 60]
 ```
+
+Options:
+- `--post-status`: Posts a GitHub commit status check directly to the PR's head commit (`success` or `failure`).
+- `--ignore-unresolved-comments`: Disables review conversation check (verifies telemetry receipts only).
+- `--timeout <sec>`: Subprocess and network execution timeout (default: 60s).
 
 ### Prune Merged Branches and Worktrees
 Prunes remote tracking branches, deletes local merged branches, and removes attached git worktrees:
@@ -173,7 +189,7 @@ antigravity-telemetry version
 
 Run unit tests across all test suites:
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 ---

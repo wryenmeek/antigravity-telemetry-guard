@@ -21,10 +21,13 @@ antigravity-telemetry post --pr <PR_NUMBER>
 
 ### 2. Verify PR Pre-Merge Guard
 ```bash
-antigravity-telemetry verify --pr <PR_NUMBER>
+antigravity-telemetry verify --pr <PR_NUMBER> [--post-status] [--ignore-unresolved-comments]
 ```
 - Validates that a verified telemetry receipt exists on the PR.
 - Verifies that all committed session IDs on the PR are present in the receipt.
+- Verifies that 100% of PR review conversation threads are resolved (blocks merge if unresolved comments remain).
+- Optional `--ignore-unresolved-comments` bypasses review comment checks if needed.
+- Optional `--post-status` posts a GitHub commit status check directly to the PR head commit.
 - Returns exit code `0` if passed; exits `1` if blocked.
 
 ### 3. Prune Merged Branches and Worktrees
