@@ -1,0 +1,4 @@
+{
+  "name": "antigravity-telemetry-guard",
+  "description": "Enforces deterministic commit receipts, automated PR spend telemetry, and pre-merge validation gates via harness hooks"
+}

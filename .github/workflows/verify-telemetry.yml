@@ -1,0 +1,38 @@
+name: Antigravity Telemetry Pre-Merge Guard
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, ready_for_review ]
+  issue_comment:
+    types: [ created, edited ]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull Request number to verify'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+
+jobs:
+  verify-telemetry-receipts:
+    name: Verify Antigravity Session Telemetry
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request) || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Antigravity Telemetry Guard
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          post-status: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}

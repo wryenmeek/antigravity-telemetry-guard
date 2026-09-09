@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antigravity-telemetry-guard"
+version = "1.0.0"
+description = "Deterministic token spend telemetry and pre-merge guard for Antigravity AI agent sessions"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Wryen Meek" }
+]
+keywords = ["antigravity", "telemetry", "ai-agents", "llm", "tokens", "github-actions", "merge-guard"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Quality Assurance"
+]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+antigravity-telemetry = "antigravity_telemetry.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wryenmeek/antigravity-telemetry-guard"
+Repository = "https://github.com/wryenmeek/antigravity-telemetry-guard"
